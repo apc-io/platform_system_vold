@@ -19,6 +19,7 @@
 
 #include <sysutils/NetlinkListener.h>
 
+#define EXAMPLE_PATH "/devices/pci0000:00/0000:00:04.0/usb1/1-1"
 class NetlinkHandler: public NetlinkListener {
 
 public:
@@ -30,5 +31,10 @@ public:
 
 protected:
     virtual void onEvent(NetlinkEvent *evt);
+	int path2host(const char * path);
+	int path2power(const char * path);
+	void send2batterycal(void);
+	void process_usb_event(const char * path,int action) ;
+	
 };
 #endif

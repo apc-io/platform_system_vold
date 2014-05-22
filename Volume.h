@@ -18,6 +18,8 @@
 #define _VOLUME_H
 
 #include <utils/List.h>
+#define EXTRA_UDISK_NUM 8
+#define EXTRA_UDISK_PATH 32
 
 class NetlinkEvent;
 class VolumeManager;
@@ -48,6 +50,12 @@ public:
     static const char *LOOPDIR;
 
 protected:
+    int extra_udisk_valid[EXTRA_UDISK_NUM];
+    char extra_udisk_devpath[EXTRA_UDISK_NUM][EXTRA_UDISK_PATH];
+    char extra_udisk_mountpath[EXTRA_UDISK_NUM][EXTRA_UDISK_PATH];
+    int first_udisk_major;
+    int first_udisk_minor;
+    
     char *mLabel;
     char *mMountpoint;
     VolumeManager *mVm;
@@ -55,6 +63,7 @@ protected:
     int mPartIdx;
     int mOrigPartIdx;
     bool mRetryMount;
+    
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -81,6 +90,7 @@ public:
 
     void setDebug(bool enable);
     virtual int getVolInfo(struct volume_info *v) = 0;
+    int doUnmount(const char *path, bool force);
 
 protected:
     void setState(int state);
@@ -92,14 +102,15 @@ protected:
     virtual int getFlags(void) = 0;
 
     int createDeviceNode(const char *path, int major, int minor);
-
+    bool isMountpointMounted(const char *path);
+    int mountExtraPartition(int major,int minor);
+    void udiskSetState(int state,int index,char * mountpoint);
 private:
     int initializeMbr(const char *deviceNode);
-    bool isMountpointMounted(const char *path);
     int createBindMounts();
-    int doUnmount(const char *path, bool force);
     int doMoveMount(const char *src, const char *dst, bool force);
     void protectFromAutorunStupidity();
+
 };
 
 typedef android::List<Volume *> VolumeCollection;

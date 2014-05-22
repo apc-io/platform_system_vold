@@ -21,13 +21,13 @@
 
 #include "Volume.h"
 
-#define MAX_PARTS 4
+#define MAX_PARTS 8
 
 typedef android::List<char *> PathCollection;
 
 class DirectVolume : public Volume {
 public:
-    static const int MAX_PARTITIONS = 4;
+    static const int MAX_PARTITIONS = MAX_PARTS;
 protected:
     PathCollection *mPaths;
     int            mDiskMajor;
@@ -71,7 +71,7 @@ private:
     void handlePartitionChanged(const char *devpath, NetlinkEvent *evt);
 
     int doMountVfat(const char *deviceNode, const char *mountPoint);
-
+    void udiskSetState(int state,int index,char * mountpoint);
 };
 
 typedef android::List<DirectVolume *> DirectVolumeCollection;

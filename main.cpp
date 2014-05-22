@@ -34,6 +34,8 @@
 #include "DirectVolume.h"
 #include "cryptfs.h"
 
+sem_t * udisk_sem;
+
 static int process_config(VolumeManager *vm);
 static void coldboot(const char *path);
 
@@ -46,7 +48,7 @@ int main() {
     SLOGI("Vold 2.1 (the revenge) firing up");
 
     mkdir("/dev/block/vold", 0755);
-
+	udisk_sem=sem_open("vold_sem",1);
     /* Create our singleton managers */
     if (!(vm = VolumeManager::Instance())) {
         SLOGE("Unable to create VolumeManager");
@@ -92,6 +94,10 @@ int main() {
     while(1) {
         sleep(1000);
     }
+
+	sem_close(udisk_sem);
+
+	sem_unlink("vold_sem");
 
     SLOGI("Vold exiting");
     exit(0);

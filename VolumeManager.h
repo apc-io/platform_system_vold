@@ -24,6 +24,8 @@
 #include <sysutils/SocketListener.h>
 
 #include "Volume.h"
+#include <semaphore.h>
+extern sem_t * udisk_sem;
 
 /* The length of an MD5 hash when encoded into ASCII hex characters */
 #define MD5_ASCII_LENGTH_PLUS_NULL ((MD5_DIGEST_LENGTH*2)+1)

@@ -31,7 +31,33 @@
 #include "ResponseCode.h"
 #include "cryptfs.h"
 
-// #define PARTITION_DEBUG
+ #define PARTITION_DEBUG
+
+static const char *stateToStr(int state) {
+    if (state == Volume::State_Init)
+        return "Initializing";
+    else if (state == Volume::State_NoMedia)
+        return "No-Media";
+    else if (state == Volume::State_Idle)
+        return "Idle-Unmounted";
+    else if (state == Volume::State_Pending)
+        return "Pending";
+    else if (state == Volume::State_Mounted)
+        return "Mounted";
+    else if (state == Volume::State_Unmounting)
+        return "Unmounting";
+    else if (state == Volume::State_Checking)
+        return "Checking";
+    else if (state == Volume::State_Formatting)
+        return "Formatting";
+    else if (state == Volume::State_Shared)
+        return "Shared-Unmounted";
+    else if (state == Volume::State_SharedMnt)
+        return "Shared-Mounted";
+    else
+        return "Unknown-Error";
+}
+
 
 DirectVolume::DirectVolume(VolumeManager *vm, const char *label,
                            const char *mount_point, int partIdx) :
@@ -46,6 +72,9 @@ DirectVolume::DirectVolume(VolumeManager *vm, const char *label,
     mDiskMinor = -1;
     mDiskNumParts = 0;
 
+    first_udisk_major=-1;
+    first_udisk_minor=-1;
+	
     setState(Volume::State_NoMedia);
 }
 
@@ -150,6 +179,16 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
     mDiskMajor = atoi(evt->findParam("MAJOR"));
     mDiskMinor = atoi(evt->findParam("MINOR"));
 
+	if(first_udisk_major==-1&&first_udisk_minor==-1){
+		SLOGD("first udisk add\n");
+		first_udisk_major = mDiskMajor;
+		first_udisk_minor = mDiskMinor;
+	}else{
+		SLOGD("not first udisk add\n");
+		return ;
+	}
+		
+
     const char *tmp = evt->findParam("NPARTS");
     if (tmp) {
         mDiskNumParts = atoi(tmp);
@@ -180,6 +219,7 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
 }
 
 void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) {
+	bool is_udisk = false;
     int major = atoi(evt->findParam("MAJOR"));
     int minor = atoi(evt->findParam("MINOR"));
 
@@ -199,6 +239,19 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
         return;
     }
 
+	if(strstr(devpath,"pci")&&strstr(devpath,"sd"))
+		is_udisk = true;
+
+    if (isMountpointMounted(getMountpoint())||
+			(is_udisk&&(getState()!=Volume::State_Pending))) {
+		SLOGD("not the first udisk in handlePartitionAdded %d %d\n",major,minor);
+		mountExtraPartition(major,minor);
+		return;
+
+	}
+
+
+
     if (part_num > mDiskNumParts) {
         mDiskNumParts = part_num;
     }
@@ -215,9 +268,13 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     } else {
         mPartMinors[part_num -1] = minor;
     }
-    mPendingPartMap &= ~(1 << part_num);
 
-    if (!mPendingPartMap) {
+
+	if(mPendingPartMap>1)
+		mPendingPartMap = mPendingPartMap>>1;
+    //mPendingPartMap &= ~(1 << part_num);
+
+    if (mPendingPartMap==0x1) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
 #endif
@@ -274,11 +331,67 @@ void DirectVolume::handlePartitionChanged(const char *devpath, NetlinkEvent *evt
     SLOGD("Volume %s %s partition %d:%d changed\n", getLabel(), getMountpoint(), major, minor);
 }
 
+
+
+void DirectVolume::udiskSetState(int state,int index,char * mountpoint) {
+    char msg[255];
+	int mState = 0;
+    int oldState = mState;
+
+
+
+	if(state == State_Idle){
+		oldState = State_Unmounting;
+	}
+	if(state == State_Unmounting){
+		oldState = State_Mounted;
+	}
+	if(state == State_NoMedia){
+		oldState = State_Idle;
+	}
+
+    if (oldState == state) {
+        SLOGW("Duplicate state (%d)\n", state);
+        return;
+    }
+
+
+
+    if ((oldState == Volume::State_Pending) && (state != Volume::State_Idle)) {
+        mRetryMount = false;
+    }
+
+    mState = state;
+
+    SLOGD("Volume Udisk%d path %s state changing %d (%s) -> %d (%s)", index,mountpoint,
+         oldState, stateToStr(oldState), mState, stateToStr(mState));
+    snprintf(msg, sizeof(msg),
+             "Volume Udisk%d %s state changed from %d (%s) to %d (%s)", index,
+             mountpoint, oldState, stateToStr(oldState), mState,
+             stateToStr(mState));
+
+    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeStateChange,
+                                         msg, false);
+}
+
+
 void DirectVolume::handleDiskRemoved(const char *devpath, NetlinkEvent *evt) {
     int major = atoi(evt->findParam("MAJOR"));
     int minor = atoi(evt->findParam("MINOR"));
     char msg[255];
     bool enabled;
+
+
+	if(first_udisk_major!=-1&&first_udisk_minor!=-1){
+		if(first_udisk_major == major && first_udisk_minor == minor){
+			SLOGD("first udisk remove\n");
+			first_udisk_major = -1;
+			first_udisk_minor = -1;
+		}else{
+			SLOGD("not the first udisk remove,do nothing\n");
+			return;
+		}
+	}
 
     if (mVm->shareEnabled(getLabel(), "ums", &enabled) == 0 && enabled) {
         mVm->unshareVolume(getLabel(), "ums");
@@ -287,6 +400,14 @@ void DirectVolume::handleDiskRemoved(const char *devpath, NetlinkEvent *evt) {
     SLOGD("Volume %s %s disk %d:%d removed\n", getLabel(), getMountpoint(), major, minor);
     snprintf(msg, sizeof(msg), "Volume %s %s disk removed (%d:%d)",
              getLabel(), getMountpoint(), major, minor);
+	if(!mDiskNumParts){
+        if (Volume::unmountVol(true, false)) {
+            SLOGE("Failed to unmount volume on bad removal (%s)", 
+                 strerror(errno));
+        } else {
+            SLOGD("Crisis averted");
+        }
+	}
     mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
                                              msg, false);
     setState(Volume::State_NoMedia);
@@ -299,6 +420,40 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
     int state;
 
     SLOGD("Volume %s %s partition %d:%d removed\n", getLabel(), getMountpoint(), major, minor);
+	char voldpath[255];
+	sprintf(voldpath,"/dev/block/vold/%d:%d",major,minor);
+	sem_wait(udisk_sem);
+
+	for(int i=0;i<EXTRA_UDISK_NUM;i++){
+		//SLOGD("extra_udisk_valid[%d] %d %s\n",i,extra_udisk_valid[i],extra_udisk_devpath[i]);
+		if(extra_udisk_valid[i]!=0&&!strcmp(voldpath,extra_udisk_devpath[i])){
+			SLOGD("doUnmount  extra_udisk_path %s\n",extra_udisk_mountpath[i]);
+			if (doUnmount(extra_udisk_mountpath[i], true)) {
+				SLOGE("Failed to remove bindmount on %s (%s)", SEC_ASECDIR_EXT, strerror(errno));
+				sem_post(udisk_sem);
+				return;
+			}
+			extra_udisk_valid[i] = 0;
+
+
+
+			
+			udiskSetState(State_Unmounting,i,extra_udisk_mountpath[i]);
+			udiskSetState(State_Idle,i,extra_udisk_mountpath[i]);
+			udiskSetState(State_NoMedia,i,extra_udisk_mountpath[i]);
+
+
+			snprintf(msg, sizeof(msg), "Volume Udisk%d %s disk removed (%d:%d)",
+			         i, extra_udisk_mountpath[i], major, minor);
+
+			mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
+			                                         msg, false);
+			
+			sem_post(udisk_sem);
+			return;
+		}
+	}
+	sem_post(udisk_sem);
 
     /*
      * The framework doesn't need to get notified of
@@ -307,6 +462,17 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
      * itself
      */
     state = getState();
+
+    /* Remove event interrupted the add event, if state is checking,
+     * let remove event sleep, add event complete than remove event.
+     */
+    while (state == Volume::State_Checking) {
+        sleep(1);
+        SLOGD("code from tp,Fail removed state =%d", state);
+        state = getState();
+        SLOGD("code from tp,new removed state =%d", state);
+    }
+
     if (state != Volume::State_Mounted && state != Volume::State_Shared) {
         return;
     }

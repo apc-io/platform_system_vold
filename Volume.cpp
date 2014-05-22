@@ -46,6 +46,7 @@
 #include "Fat.h"
 #include "Process.h"
 #include "cryptfs.h"
+#include "DirectVolume.h"
 
 extern "C" void dos_partition_dec(void const *pp, struct dos_partition *d);
 extern "C" void dos_partition_enc(void *pp, struct dos_partition *d);
@@ -289,8 +290,109 @@ bool Volume::isMountpointMounted(const char *path) {
     return false;
 }
 
+void Volume::udiskSetState(int state,int index,char * mountpoint) {
+    char msg[255];
+	int mState = State_Idle;
+    int oldState = mState;
+
+	SLOGI("udiskSetState");
+	if(state == State_Mounted){
+		oldState = State_Checking;
+	}
+	
+	if(state == State_Checking){
+		oldState = State_Idle;
+	}
+	
+    if (oldState == state) {
+        SLOGW("Duplicate state (%d)\n", state);
+        return;
+    }
+
+    if ((oldState == Volume::State_Pending) && (state != Volume::State_Idle)) {
+        mRetryMount = false;
+    }
+
+    mState = state;
+
+    SLOGD("Volume Udisk%d state changing %d (%s) -> %d (%s)", index,
+         oldState, stateToStr(oldState), mState, stateToStr(mState));
+    snprintf(msg, sizeof(msg),
+             "Volume Udisk%d %s state changed from %d (%s) to %d (%s)", index,
+             mountpoint, oldState, stateToStr(oldState), mState,
+             stateToStr(mState));
+
+    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeStateChange,
+                                         msg, false);
+   	//String action = null;
+	//action = Intent.ACTION_MEDIA_MOUNTED;
+	//sendStorageIntent(action, "aaa", UserHandle.ALL);
+}
+
+int Volume::mountExtraPartition(int major,int minor){
+	int rtn = -1;
+    char devicePath[255];
+	char mountPath[255];
+	
+
+    sprintf(devicePath, "/dev/block/vold/%d:%d", major,minor);
+
+    SLOGI("mountExtraPartition:%s being considered for volume %s\n", devicePath, getLabel());
+
+
+	int j=-1;
+	sem_wait(udisk_sem);
+	for(j=0;j<EXTRA_UDISK_NUM;j++){
+		if(extra_udisk_valid[j]==0)
+			break;
+	}
+
+	if(j==-1){
+		SLOGE("this should not happy!!!!!!!!!!!!!!!!!!!!!!!\n");
+		goto out;
+	}
+
+	//start from udisk2
+	sprintf(mountPath,"/storage/udisk%d",j+2);
+
+	SLOGI("call mount %s %s\n",devicePath, mountPath);
+
+
+    if (Fat::check(devicePath)) {
+        if (errno == ENODATA) {
+            SLOGW("%s does not contain a FAT filesystem\n", devicePath);
+            goto out;
+        }
+        errno = EIO;
+        /* Badness - abort the mount */
+        SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+        goto out;
+    }
+
+    if (Fat::doMount(devicePath, mountPath, false, false, false,
+            AID_SYSTEM, AID_SDCARD_RW, 0702, true)) {
+        SLOGE("%s failed to mount via VFAT (%s)\n", devicePath, strerror(errno));
+        goto out;
+    }
+	extra_udisk_valid[j] = 1;
+	strcpy(extra_udisk_mountpath[j],mountPath);
+	strcpy(extra_udisk_devpath[j],devicePath);
+
+	udiskSetState(State_Checking,j+2,mountPath);
+
+
+	udiskSetState(State_Mounted,j+2,mountPath);
+
+
+	rtn = 0;
+out:
+	sem_post(udisk_sem);
+
+	return rtn;
+}
+
 int Volume::mountVol() {
-    dev_t deviceNodes[4];
+    dev_t deviceNodes[MAX_PARTS];
     int n, i, rc = 0;
     char errmsg[255];
     const char* externalStorage = getenv("EXTERNAL_STORAGE");
@@ -331,7 +433,7 @@ int Volume::mountVol() {
         return 0;
     }
 
-    n = getDeviceNodes((dev_t *) &deviceNodes, 4);
+    n = getDeviceNodes((dev_t *) &deviceNodes, MAX_PARTS);
     if (!n) {
         SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
         return -1;
@@ -380,7 +482,7 @@ int Volume::mountVol() {
         updateDeviceInfo(nodepath, new_major, new_minor);
 
         /* Get the device nodes again, because they just changed */
-        n = getDeviceNodes((dev_t *) &deviceNodes, 4);
+        n = getDeviceNodes((dev_t *) &deviceNodes, MAX_PARTS);
         if (!n) {
             SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
             return -1;
@@ -392,6 +494,14 @@ int Volume::mountVol() {
 
         sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes[i]),
                 MINOR(deviceNodes[i]));
+
+
+		if(MINOR(deviceNodes[i]) == 255){
+			SLOGI("skip 255 device\n");
+			continue;
+		}
+
+
 
         SLOGI("%s being considered for volume %s\n", devicePath, getLabel());
 
@@ -406,6 +516,7 @@ int Volume::mountVol() {
             errno = EIO;
             /* Badness - abort the mount */
             SLOGE("%s failed FS checks (%s)", devicePath, strerror(errno));
+			continue;
             setState(Volume::State_Idle);
             return -1;
         }
@@ -423,7 +534,15 @@ int Volume::mountVol() {
             gid = AID_SDCARD_RW;
         } else {
             // For secondary external storage we keep things locked up.
-            gid = AID_MEDIA_RW;
+//            gid = AID_MEDIA_RW;
+            gid = AID_SDCARD_RW;
+        }
+
+        /* The volume state is changed by remove event, do not execute doMount()*/
+        if((getState() != Volume::State_Checking)) {
+            SLOGW("code from tp,Fail mount state = %d", getState());
+            SLOGW("code from tp,Volume state is error, filesystem can't mounted");
+            return -1;
         }
         if (Fat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
                 AID_SYSTEM, gid, 0702, true)) {
@@ -431,7 +550,7 @@ int Volume::mountVol() {
             continue;
         }
 
-        SLOGI("Device %s, target %s mounted @ /mnt/secure/staging", devicePath, getMountpoint());
+        SLOGI("Device %s  target %s mounted @ /mnt/secure/staging", devicePath, getMountpoint());
 
         protectFromAutorunStupidity();
 
@@ -439,8 +558,11 @@ int Volume::mountVol() {
         if (primaryStorage && createBindMounts()) {
             SLOGE("Failed to create bindmounts (%s)", strerror(errno));
             umount("/mnt/secure/staging");
+			continue;
             setState(Volume::State_Idle);
             return -1;
+        }else{
+            SLOGI("primaryStorage is %d, externalStorage is %s", primaryStorage, externalStorage==NULL?"null":externalStorage);
         }
 
         /*
@@ -450,11 +572,20 @@ int Volume::mountVol() {
         if (doMoveMount("/mnt/secure/staging", getMountpoint(), false)) {
             SLOGE("Failed to move mount (%s)", strerror(errno));
             umount("/mnt/secure/staging");
+			continue;
             setState(Volume::State_Idle);
             return -1;
         }
         setState(Volume::State_Mounted);
         mCurrentlyMountedKdev = deviceNodes[i];
+
+		for(int j=i+1;j<n;j++){
+	        char devicePath[255];
+	        sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes[j]),
+	                MINOR(deviceNodes[j]));
+	        SLOGI("%s being considered for extra partition volume %s\n", devicePath, getLabel());
+			mountExtraPartition(MAJOR(deviceNodes[j]),MINOR(deviceNodes[j]));
+		}
         return 0;
     }
 
@@ -569,7 +700,7 @@ int Volume::doUnmount(const char *path, bool force) {
     }
 
     while (retries--) {
-        if (!umount(path) || errno == EINVAL || errno == ENOENT) {
+        if (!umount(path) || errno == EINVAL || errno == ENOENT|| errno == EIO){
             SLOGI("%s sucessfully unmounted", path);
             return 0;
         }

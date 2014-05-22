@@ -39,8 +39,6 @@
 #include "Devmapper.h"
 #include "cryptfs.h"
 
-#define DUMP_ARGS 0
-
 CommandListener::CommandListener() :
                  FrameworkListener("vold", true) {
     registerCmd(new DumpCmd());
@@ -53,7 +51,6 @@ CommandListener::CommandListener() :
 }
 
 void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
-#if DUMP_ARGS
     char buffer[4096];
     char *p = buffer;
 
@@ -79,7 +76,6 @@ void CommandListener::dumpArgs(int argc, char **argv, int argObscure) {
         }
     }
     SLOGD("%s", buffer);
-#endif
 }
 
 CommandListener::DumpCmd::DumpCmd() :

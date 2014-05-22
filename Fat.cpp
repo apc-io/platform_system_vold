@@ -44,9 +44,10 @@ static char FSCK_MSDOS_PATH[] = "/system/bin/fsck_msdos";
 static char MKDOSFS_PATH[] = "/system/bin/newfs_msdos";
 extern "C" int logwrap(int argc, const char **argv, int background);
 extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
-
+bool is_ntfs = false;
 int Fat::check(const char *fsPath) {
     bool rw = true;
+	is_ntfs = false;
     if (access(FSCK_MSDOS_PATH, X_OK)) {
         SLOGW("Skipping fs checks\n");
         return 0;
@@ -71,6 +72,7 @@ int Fat::check(const char *fsPath) {
 
         case 2:
             SLOGE("Filesystem check failed (not a FAT filesystem)");
+			goto check_ntfs;
             errno = ENODATA;
             return -1;
 
@@ -83,7 +85,11 @@ int Fat::check(const char *fsPath) {
             SLOGE("Failing check after too many rechecks");
             errno = EIO;
             return -1;
-
+		//kevin add ,tip "blank sd" when 3g dongle plugin	
+		case 100:
+			SLOGE("Filesystem check failed (not data found)");
+            errno = ENODATA;
+            return -1;			
         default:
             SLOGE("Filesystem check failed (unknown exit code %d)", rc);
             errno = EIO;
@@ -91,6 +97,8 @@ int Fat::check(const char *fsPath) {
         }
     } while (0);
 
+check_ntfs:
+	is_ntfs = true;
     return 0;
 }
 
@@ -101,11 +109,15 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
     unsigned long flags;
     char mountData[255];
 
+	if(is_ntfs){
+		flags = 0x8000;
+	}else{
     flags = MS_NODEV | MS_NOSUID | MS_DIRSYNC;
 
     flags |= (executable ? 0 : MS_NOEXEC);
     flags |= (ro ? MS_RDONLY : 0);
     flags |= (remount ? MS_REMOUNT : 0);
+	}
 
     /*
      * Note: This is a temporary hack. If the sampling profiler is enabled,
@@ -125,6 +137,13 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
             "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
             ownerUid, ownerGid, permMask, permMask);
 
+	if(is_ntfs){
+		char cmd[256];
+		sprintf(cmd,"/bin/ntfs-3g %s %s -o %s\n",fsPath, mountPoint,mountData);
+    	system(cmd);
+		rc = 0;
+	}
+	else
     rc = mount(fsPath, mountPoint, "vfat", flags, mountData);
 
     if (rc && errno == EROFS) {
